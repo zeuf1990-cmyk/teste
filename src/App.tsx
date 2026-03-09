@@ -1,4 +1,3 @@
-import { GoogleGenAI, Type } from "@google/genai";
 import { useState, useEffect, useRef, useMemo } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { 
@@ -14,17 +13,13 @@ function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
-// Initialize Gemini lazily
-let aiInstance: GoogleGenAI | null = null;
-const getAI = () => {
-  const apiKey = process.env.GEMINI_API_KEY;
+const getOpenAIApiKey = () => {
+  const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey || apiKey === "undefined") {
-    throw new Error("Gemini API key is missing. Please add GEMINI_API_KEY to your secrets.");
+    throw new Error("OpenAI API key is missing. Please add OPENAI_API_KEY to your secrets.");
   }
-  if (!aiInstance) {
-    aiInstance = new GoogleGenAI({ apiKey });
-  }
-  return aiInstance;
+
+  return apiKey;
 };
 
 interface Meal {
@@ -55,6 +50,51 @@ const getLocalDateString = (date: Date) => {
   const month = String(date.getMonth() + 1).padStart(2, '0');
   const day = String(date.getDate()).padStart(2, '0');
   return `${year}-${month}-${day}`;
+};
+
+interface ParsedMealResponse {
+  success: boolean;
+  error_message?: string;
+  items?: Array<Pick<Meal, "food_name" | "protein_g" | "carbs_g" | "fats_g">>;
+}
+
+const extractMealsWithChatGPT = async (input: string): Promise<ParsedMealResponse> => {
+  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${getOpenAIApiKey()}`,
+    },
+    body: JSON.stringify({
+      model: "gpt-4o-mini",
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "system",
+          content:
+            "Extract nutritional data from meal descriptions. Return JSON with success:boolean, error_message:string, and items:Array<{food_name, protein_g, carbs_g, fats_g}>. Be accurate with portions.",
+        },
+        {
+          role: "user",
+          content: input,
+        },
+      ],
+      temperature: 0.2,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`OpenAI request failed (${response.status})`);
+  }
+
+  const data = await response.json();
+  const content = data?.choices?.[0]?.message?.content;
+
+  if (!content) {
+    throw new Error("AI returned an empty response.");
+  }
+
+  return JSON.parse(content) as ParsedMealResponse;
 };
 
 export default function App() {
@@ -91,44 +131,14 @@ export default function App() {
     setError(null);
 
     try {
-      const ai = getAI();
-      const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: inputText,
-        config: {
-          systemInstruction: `Extract nutritional data from meal descriptions. Return JSON with success:boolean, error_message:string, and items:Array<{food_name, protein_g, carbs_g, fats_g}>. Be accurate with portions.`,
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              success: { type: Type.BOOLEAN },
-              error_message: { type: Type.STRING },
-              items: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    food_name: { type: Type.STRING },
-                    protein_g: { type: Type.INTEGER },
-                    carbs_g: { type: Type.INTEGER },
-                    fats_g: { type: Type.INTEGER },
-                  },
-                  required: ["food_name", "protein_g", "carbs_g", "fats_g"],
-                },
-              },
-            },
-            required: ["success"],
-          },
-        },
-      });
-
-      if (!response.text) {
-        throw new Error("AI returned an empty response. This might be due to safety filters or a temporary service issue.");
-      }
-
-      const data = JSON.parse(response.text);
+      const data = await extractMealsWithChatGPT(inputText);
       if (!data.success) {
         setError(data.error_message || "Could not recognize food.");
+        return;
+      }
+
+      if (!Array.isArray(data.items) || data.items.length === 0) {
+        setError("Could not recognize food.");
         return;
       }
 
