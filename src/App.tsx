@@ -17,8 +17,12 @@ function cn(...inputs: ClassValue[]) {
 // Initialize Gemini lazily
 let aiInstance: GoogleGenAI | null = null;
 const getAI = () => {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey || apiKey === "undefined") {
+    throw new Error("Gemini API key is missing. Please add GEMINI_API_KEY to your secrets.");
+  }
   if (!aiInstance) {
-    aiInstance = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+    aiInstance = new GoogleGenAI({ apiKey });
   }
   return aiInstance;
 };
@@ -66,6 +70,7 @@ export default function App() {
   const [isEditingGoals, setIsEditingGoals] = useState(false);
   const [editGoalsForm, setEditGoalsForm] = useState<Goals>(defaultGoals);
   const [showCalendar, setShowCalendar] = useState(false);
+  const [calendarMonth, setCalendarMonth] = useState(new Date());
 
   // Persistence
   useEffect(() => {
@@ -117,7 +122,11 @@ export default function App() {
         },
       });
 
-      const data = JSON.parse(response.text || "{}");
+      if (!response.text) {
+        throw new Error("AI returned an empty response. This might be due to safety filters or a temporary service issue.");
+      }
+
+      const data = JSON.parse(response.text);
       if (!data.success) {
         setError(data.error_message || "Could not recognize food.");
         return;
@@ -134,8 +143,9 @@ export default function App() {
 
       setMeals(prev => [...newMeals, ...prev]);
       setInputText("");
-    } catch (err) {
-      setError("AI service unavailable. Please try again.");
+    } catch (err: any) {
+      console.error("AI Error:", err);
+      setError(err.message || "AI service unavailable. Please try again.");
     } finally {
       setIsLoading(false);
     }
@@ -156,6 +166,41 @@ export default function App() {
 
   const totalCals = calculateCalories(totals.p, totals.c, totals.f);
   const goalCals = calculateCalories(goals.protein, goals.carbs, goals.fats);
+
+  const calendarDays = useMemo(() => {
+    const year = calendarMonth.getFullYear();
+    const month = calendarMonth.getMonth();
+    const firstDay = new Date(year, month, 1);
+    const lastDay = new Date(year, month + 1, 0);
+    
+    const days = [];
+    
+    // Padding for start of month
+    const startPadding = firstDay.getDay();
+    for (let i = 0; i < startPadding; i++) {
+      days.push(null);
+    }
+    
+    for (let d = 1; d <= lastDay.getDate(); d++) {
+      const date = new Date(year, month, d);
+      const dateStr = getLocalDateString(date);
+      const dayMeals = meals.filter(m => getLocalDateString(new Date(m.timestamp)) === dateStr);
+      const dayTotals = dayMeals.reduce(
+        (acc, m) => ({ p: acc.p + m.protein_g, c: acc.c + m.carbs_g, f: acc.f + m.fats_g }),
+        { p: 0, c: 0, f: 0 }
+      );
+      const dayCals = calculateCalories(dayTotals.p, dayTotals.c, dayTotals.f);
+      
+      days.push({
+        date,
+        dateStr,
+        calories: dayCals,
+        hasMeals: dayMeals.length > 0
+      });
+    }
+    
+    return days;
+  }, [calendarMonth, meals]);
 
   const isToday = selectedDate === getLocalDateString(new Date());
   const displayDate = isToday ? "Today" : new Date(`${selectedDate}T12:00:00`).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
@@ -206,6 +251,96 @@ export default function App() {
       </header>
 
       <main className="max-w-2xl mx-auto px-4 pt-6 space-y-6">
+        <AnimatePresence>
+          {showCalendar && (
+            <motion.section
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: "auto", opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }}
+              className="overflow-hidden"
+            >
+              <div className="m3-card p-6 bg-white shadow-lg border-surface-variant">
+                <div className="flex items-center justify-between mb-6">
+                  <h2 className="text-lg font-bold text-on-surface">
+                    {calendarMonth.toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}
+                  </h2>
+                  <div className="flex gap-2">
+                    <button 
+                      onClick={() => setCalendarMonth(new Date())}
+                      className="px-3 py-1 text-[10px] font-bold text-primary hover:bg-primary/10 rounded-lg transition-colors uppercase tracking-widest"
+                    >
+                      Today
+                    </button>
+                    <button 
+                      onClick={() => setCalendarMonth(new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() - 1, 1))}
+                      className="p-2 hover:bg-surface-variant rounded-xl transition-colors"
+                    >
+                      <ChevronLeft size={20} />
+                    </button>
+                    <button 
+                      onClick={() => setCalendarMonth(new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() + 1, 1))}
+                      className="p-2 hover:bg-surface-variant rounded-xl transition-colors"
+                    >
+                      <ChevronRight size={20} />
+                    </button>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-7 gap-1 text-center mb-2">
+                  {['S', 'M', 'T', 'W', 'T', 'F', 'S'].map(d => (
+                    <div key={d} className="text-[10px] font-bold text-on-surface-variant uppercase tracking-widest">
+                      {d}
+                    </div>
+                  ))}
+                </div>
+
+                <div className="grid grid-cols-7 gap-2">
+                  {calendarDays.map((day, i) => {
+                    if (!day) return <div key={`empty-${i}`} className="aspect-square" />;
+                    
+                    const isSelected = day.dateStr === selectedDate;
+                    const isOverGoal = day.calories > goalCals;
+                    const isWithinGoal = day.hasMeals && day.calories <= goalCals;
+                    
+                    return (
+                      <button
+                        key={day.dateStr}
+                        onClick={() => {
+                          setSelectedDate(day.dateStr);
+                          setShowCalendar(false);
+                        }}
+                        className={cn(
+                          "aspect-square rounded-2xl flex flex-col items-center justify-center relative transition-all hover:scale-105 active:scale-95",
+                          isSelected ? "bg-primary text-on-primary shadow-md" : "bg-surface-variant/20 text-on-surface"
+                        )}
+                      >
+                        <span className="text-sm font-bold">{day.date.getDate()}</span>
+                        {day.hasMeals && (
+                          <div className={cn(
+                            "w-1.5 h-1.5 rounded-full absolute bottom-2",
+                            isOverGoal ? "bg-rose-500" : "bg-emerald-500"
+                          )} />
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div className="mt-6 flex items-center justify-center gap-4 text-[10px] font-bold text-on-surface-variant uppercase tracking-widest">
+                  <div className="flex items-center gap-1.5">
+                    <div className="w-2 h-2 rounded-full bg-emerald-500" />
+                    Within Goal
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <div className="w-2 h-2 rounded-full bg-rose-500" />
+                    Over Goal
+                  </div>
+                </div>
+              </div>
+            </motion.section>
+          )}
+        </AnimatePresence>
+
         {/* Progress Card */}
         <motion.section 
           initial={{ opacity: 0, y: 20 }}
@@ -231,7 +366,10 @@ export default function App() {
                 <circle cx="80" cy="80" r="70" className="stroke-surface-variant fill-none" strokeWidth="12" />
                 <motion.circle 
                   cx="80" cy="80" r="70" 
-                  className="stroke-primary fill-none" 
+                  className={cn(
+                    "fill-none transition-colors duration-500",
+                    totalCals > goalCals ? "stroke-rose-500" : "stroke-primary"
+                  )}
                   strokeWidth="12" 
                   strokeLinecap="round"
                   initial={{ strokeDasharray: "0 440" }}
@@ -240,7 +378,10 @@ export default function App() {
                 />
               </svg>
               <div className="absolute inset-0 flex flex-col items-center justify-center">
-                <span className="text-3xl font-black text-on-surface">{totalCals}</span>
+                <span className={cn(
+                  "text-3xl font-black transition-colors",
+                  totalCals > goalCals ? "text-rose-500" : "text-on-surface"
+                )}>{totalCals}</span>
                 <span className="text-xs font-medium text-on-surface-variant">of {goalCals} kcal</span>
               </div>
             </div>
@@ -253,17 +394,26 @@ export default function App() {
               ].map((macro) => (
                 <div key={macro.label} className="space-y-1.5">
                   <div className="flex justify-between items-end">
-                    <div className="flex items-center gap-2 text-sm font-bold text-on-surface">
-                      <macro.icon size={14} className="text-on-surface-variant" />
+                    <div className={cn(
+                      "flex items-center gap-2 text-sm font-bold transition-colors",
+                      macro.val > macro.goal ? "text-rose-500" : "text-on-surface"
+                    )}>
+                      <macro.icon size={14} className={macro.val > macro.goal ? "text-rose-500" : "text-on-surface-variant"} />
                       {macro.label}
                     </div>
-                    <span className="text-xs font-medium text-on-surface-variant">{macro.val} / {macro.goal}g</span>
+                    <span className={cn(
+                      "text-xs font-medium transition-colors",
+                      macro.val > macro.goal ? "text-rose-500" : "text-on-surface-variant"
+                    )}>{macro.val} / {macro.goal}g</span>
                   </div>
                   <div className="h-2 bg-surface-variant rounded-full overflow-hidden">
                     <motion.div 
                       initial={{ width: 0 }}
                       animate={{ width: `${Math.min(100, (macro.val / macro.goal) * 100)}%` }}
-                      className={cn("h-full rounded-full", macro.color)}
+                      className={cn(
+                        "h-full rounded-full transition-colors duration-500",
+                        macro.val > macro.goal ? "bg-rose-500" : macro.color
+                      )}
                     />
                   </div>
                 </div>
@@ -336,26 +486,82 @@ export default function App() {
                   initial={{ opacity: 0, scale: 0.95 }}
                   animate={{ opacity: 1, scale: 1 }}
                   exit={{ opacity: 0, scale: 0.95 }}
-                  className="m3-card p-4 flex items-center justify-between group"
+                  className="m3-card p-4 group"
                 >
-                  <div className="space-y-1">
-                    <h3 className="font-bold text-on-surface">{meal.food_name}</h3>
-                    <div className="flex items-center gap-3 text-[10px] font-bold text-on-surface-variant uppercase tracking-tighter">
-                      <span className="flex items-center gap-1"><Beef size={10} /> {meal.protein_g}g</span>
-                      <span className="flex items-center gap-1"><Wheat size={10} /> {meal.carbs_g}g</span>
-                      <span className="flex items-center gap-1"><Droplet size={10} /> {meal.fats_g}g</span>
-                      <span className="text-primary ml-2">{calculateCalories(meal.protein_g, meal.carbs_g, meal.fats_g)} kcal</span>
+                  {editingMealId === meal.id ? (
+                    <div className="space-y-4">
+                      <input 
+                        type="text"
+                        value={editForm.food_name || ""}
+                        onChange={(e) => setEditForm({ ...editForm, food_name: e.target.value })}
+                        className="w-full bg-surface-variant/30 rounded-xl px-3 py-2 outline-none focus:ring-2 ring-primary/20 font-bold"
+                      />
+                      <div className="grid grid-cols-3 gap-3">
+                        {[
+                          { label: "P", key: "protein_g" as const },
+                          { label: "C", key: "carbs_g" as const },
+                          { label: "F", key: "fats_g" as const },
+                        ].map((f) => (
+                          <div key={f.key} className="space-y-1">
+                            <label className="text-[10px] font-bold text-on-surface-variant uppercase ml-1">{f.label}</label>
+                            <input 
+                              type="number" 
+                              value={editForm[f.key] || 0}
+                              onChange={(e) => setEditForm({ ...editForm, [f.key]: Number(e.target.value) })}
+                              className="w-full bg-surface-variant/30 rounded-xl px-2 py-1.5 outline-none focus:ring-2 ring-primary/20 text-sm font-bold"
+                            />
+                          </div>
+                        ))}
+                      </div>
+                      <div className="flex gap-2">
+                        <button 
+                          onClick={() => setEditingMealId(null)}
+                          className="flex-1 py-2 text-sm font-bold text-on-surface-variant hover:bg-surface-variant/30 rounded-xl transition-all"
+                        >
+                          Cancel
+                        </button>
+                        <button 
+                          onClick={() => {
+                            setMeals(prev => prev.map(m => m.id === meal.id ? { ...m, ...editForm } as Meal : m));
+                            setEditingMealId(null);
+                          }}
+                          className="flex-1 bg-primary text-on-primary py-2 text-sm font-bold rounded-xl shadow-lg shadow-primary/20"
+                        >
+                          Save
+                        </button>
+                      </div>
                     </div>
-                  </div>
-                  
-                  <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                    <button 
-                      onClick={() => setMeals(prev => prev.filter(m => m.id !== meal.id))}
-                      className="p-2 hover:bg-rose-50 text-on-surface-variant hover:text-rose-500 rounded-xl transition-all"
-                    >
-                      <Trash2 size={18} />
-                    </button>
-                  </div>
+                  ) : (
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-1">
+                        <h3 className="font-bold text-on-surface">{meal.food_name}</h3>
+                        <div className="flex items-center gap-3 text-[10px] font-bold text-on-surface-variant uppercase tracking-tighter">
+                          <span className="flex items-center gap-1"><Beef size={10} /> {meal.protein_g}g</span>
+                          <span className="flex items-center gap-1"><Wheat size={10} /> {meal.carbs_g}g</span>
+                          <span className="flex items-center gap-1"><Droplet size={10} /> {meal.fats_g}g</span>
+                          <span className="text-primary ml-2">{calculateCalories(meal.protein_g, meal.carbs_g, meal.fats_g)} kcal</span>
+                        </div>
+                      </div>
+                      
+                      <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <button 
+                          onClick={() => {
+                            setEditingMealId(meal.id);
+                            setEditForm(meal);
+                          }}
+                          className="p-2 hover:bg-surface-variant/50 text-on-surface-variant hover:text-primary rounded-xl transition-all"
+                        >
+                          <Pencil size={18} />
+                        </button>
+                        <button 
+                          onClick={() => setMeals(prev => prev.filter(m => m.id !== meal.id))}
+                          className="p-2 hover:bg-rose-50 text-on-surface-variant hover:text-rose-500 rounded-xl transition-all"
+                        >
+                          <Trash2 size={18} />
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </motion.div>
               ))
             ) : (
