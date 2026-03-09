@@ -287,8 +287,8 @@ export default function App() {
                 </div>
 
                 <div className="grid grid-cols-7 gap-1 text-center mb-2">
-                  {['S', 'M', 'T', 'W', 'T', 'F', 'S'].map(d => (
-                    <div key={d} className="text-[10px] font-bold text-on-surface-variant uppercase tracking-widest">
+                  {['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((d, i) => (
+                    <div key={`${d}-${i}`} className="text-[10px] font-bold text-on-surface-variant uppercase tracking-widest">
                       {d}
                     </div>
                   ))}
